@@ -1,10 +1,10 @@
 #!/bin/bash
 
+cd "$(dirname "$0")" || exit 1
+
 echo "Running YouTube Shorts updater..."
-
-cd "$(dirname "$0")/yt"
-
 python3 ytviews.py
 
 echo
-echo "Done. You can close this window."
+echo "Done. Press any key to close."
+read -n 1 -s -r

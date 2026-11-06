@@ -1,0 +1,25 @@
+{
+  "tiktok": {
+    "profile_url": "tiktokuser:MS4wLjABAAAAOVRauhiMaTukhg1p_t778GWLRhBEjKPZzAB__UYBUZDFz_eb9-dH7kumP-nGQ-Qb",
+    "impersonate": "Chrome-124",
+    "include_missing_in_total": true
+  },
+  "youtube": {
+    "channel_url": "https://www.youtube.com/@togiclips646",
+    "include_missing_in_total": false
+  },
+  "fetch": {
+    "retries": 2,
+    "backoff_seconds": 5
+  },
+  "rpm_tiers": [
+    {
+      "up_to": 3190000,
+      "rpm": 0.1
+    },
+    {
+      "up_to": null,
+      "rpm": 0.12
+    }
+  ]
+}
