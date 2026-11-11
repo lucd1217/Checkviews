@@ -8,12 +8,53 @@ import csv
 import json
 import re
 import shutil
+import subprocess
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
 MIN_KEEP_RATIO = 0.5   # abort if a fetch returns < 50% of the known ACTIVE videos
 MIN_GUARD_VIDEOS = 10  # ...but only enforce that once we know at least this many
 BACKUPS_TO_KEEP = 10
+
+
+# ---------------- PROGRESS REPORTING + STREAMING ----------------
+
+PROGRESS_PREFIX = "@@PROGRESS "
+
+
+def report(stage, done=None, total=None):
+    """Tell whoever launched this process how far along it is. The launcher (run.py) picks these
+    lines up and shows them in the progress window; they are never shown as normal output."""
+    print(PROGRESS_PREFIX + json.dumps({"stage": stage, "done": done, "total": total}), flush=True)
+
+
+def stream_json(cmd, cwd, on_json, timeout=None):
+    """Run a command and hand every JSON object it prints to on_json() as soon as it arrives
+    (instead of waiting for the whole run). stderr is merged in. Returns (returncode, other_lines),
+    where other_lines are the non-JSON lines (warnings/errors). If `timeout` passes, the process is
+    killed but everything it printed so far has already been delivered."""
+    proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    timer = threading.Timer(timeout, proc.kill) if timeout else None
+    if timer:
+        timer.start()
+    other = []
+    try:
+        for line in proc.stdout:
+            line = line.rstrip("\n")
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                if line.strip():
+                    other.append(line)
+                continue
+            if isinstance(data, dict):
+                on_json(data)
+    finally:
+        if timer:
+            timer.cancel()
+        proc.wait()
+    return proc.returncode, other
 
 
 import history  # noqa: E402  (single source for everything time-based)
@@ -221,6 +262,7 @@ def run_platform(label, base_dir, fetch_fn, legacy_precise, csv_name):
         print(f"   {label} history was NOT modified.")
         return 1
 
+    report("Saving…")
     backup_history(state_file)
     apply_fetch(state, fetched, legacy_precise)
     save_json(state_file, state)

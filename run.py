@@ -7,6 +7,7 @@ Platforms run at the same time (e.g. TikTok and YouTube together). Channels on t
 same platform run one after another, so several YouTube channels never pile up
 requests and trigger YouTube's rate limiting.
 """
+import json
 import os
 import subprocess
 import sys
@@ -19,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "yt"))
 
 import channels as ch_lib  # noqa: E402
 import total_views  # noqa: E402
+from trackerlib import PROGRESS_PREFIX  # noqa: E402
 
 RUNNERS = {"tiktok": "ttviews", "youtube": "ytviews"}
 
@@ -39,11 +41,12 @@ def resolve_new(data, platform, raw):
 
 
 def choose(data, use_last):
+    """Returns (selected channels or None, whether the picker window worked)."""
     if use_last:
-        return ch_lib.last_selected(data)
+        return ch_lib.last_selected(data), False
     try:
         import dialog
-        return dialog.pick_channels(data, lambda p, r: resolve_new(data, p, r))
+        return dialog.pick_channels(data, lambda p, r: resolve_new(data, p, r)), True
     except Exception as e:  # no display / Tk problem: fall back rather than fail
         last = ", ".join(ch_lib.label(c) for c in ch_lib.last_selected(data))
         print("\n" + "!" * 60)
@@ -51,7 +54,7 @@ def choose(data, use_last):
         print(f"!!  Using the last selection instead: {last}")
         print("!" * 60 + "\n")
         time.sleep(5)  # long enough to read before the output scrolls
-        return ch_lib.last_selected(data)
+        return ch_lib.last_selected(data), False
 
 
 def run_one(ch):
@@ -64,10 +67,12 @@ def child_command(ch):
     return [sys.executable, str(Path(__file__).resolve()), "--only", ch["id"]]
 
 
-def run_parallel(selected, build_cmd=child_command):
+def run_parallel(selected, build_cmd=child_command, on_event=None):
     """Run one worker per platform at once; within a platform, channels go in order.
 
-    Each channel runs in its own process so output can be prefixed per channel.
+    Each channel runs in its own process so output can be prefixed per channel. If on_event is given,
+    it is called as on_event(channel, payload) with progress updates, output lines and a final
+    {"finished": True, "ok": ...}. Progress lines are never printed as normal output.
     Returns the number of channels that failed.
     """
     groups = {}
@@ -86,14 +91,28 @@ def run_parallel(selected, build_cmd=child_command):
         for ch in chs:
             prefix = f"[{ch_lib.label(ch)}] "
             emit(prefix, "starting…")
+            if on_event:
+                on_event(ch, {"stage": "Starting…"})
             proc = subprocess.Popen(build_cmd(ch), stdout=subprocess.PIPE,
                                     stderr=subprocess.STDOUT, text=True, env=env,
                                     cwd=Path(__file__).resolve().parent)
             for line in proc.stdout:
+                if line.startswith(PROGRESS_PREFIX):
+                    if on_event:
+                        try:
+                            on_event(ch, json.loads(line[len(PROGRESS_PREFIX):]))
+                        except json.JSONDecodeError:
+                            pass
+                    continue
                 if line.strip():
                     emit(prefix, line.rstrip())
-            if proc.wait() != 0:
+                    if on_event:
+                        on_event(ch, {"line": line.rstrip()})
+            ok = proc.wait() == 0
+            if not ok:
                 failures.append(ch["id"])
+            if on_event:
+                on_event(ch, {"finished": True, "ok": ok})
 
     threads = [threading.Thread(target=worker, args=(chs,)) for chs in groups.values()]
     started = time.time()
@@ -112,7 +131,7 @@ def main():
         ch = ch_lib.by_id(data, sys.argv[sys.argv.index("--only") + 1])
         return run_one(ch) if ch else 2
 
-    selected = choose(data, "--last" in sys.argv)
+    selected, gui = choose(data, "--last" in sys.argv)
     if not selected:
         print("Cancelled.")
         return 130
@@ -120,10 +139,25 @@ def main():
     data["last_selected"] = [c["id"] for c in selected]
     ch_lib.save(data)
 
-    failures = run_parallel(selected)
+    def work(post=None):
+        """Update every selected channel, then build the sheet. Runs in a background thread when a
+        progress window is showing, so the window stays responsive."""
+        on_event = (lambda ch, payload: post(ch["id"], payload)) if post else None
+        failed = run_parallel(selected, on_event=on_event)
+        if post:
+            post("__all__", {"stage": "Building the sheet…"})
+        print("\nAggregating total views...")
+        total_views.main(selected)
+        return failed
 
-    print("\nAggregating total views...")
-    total_views.main(selected)
+    window = None
+    if gui:  # the picker was used, so a window system exists; show progress instead of freezing
+        try:
+            from progress import ProgressWindow
+            window = ProgressWindow(selected)
+        except Exception as e:  # noqa: BLE001 - never block the run on a cosmetic window
+            print(f"(No progress window: {e})")
+    failures = window.run(work) if window else work()
     return 1 if failures else 0
 
 

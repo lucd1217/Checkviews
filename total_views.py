@@ -173,9 +173,60 @@ def build_dashboard(s, since_day=None):
 
 # ---------------- SIDE-BY-SIDE SHEET (a view only; every channel keeps its own data) ----------------
 
+def grand_total_rows(selected_stats, since_day=None):
+    """Grand totals across the selected channels. Computed from each channel's own numbers every time the
+    sheet is built; nothing here is stored. (Only shown when more than one channel is selected.)"""
+    if len(selected_stats) < 2:
+        return []
+    G = "GRAND TOTAL"
+    total = sum(s["total"] for s in selected_stats)
+    growth = sum(s["growth"] for s in selected_stats)
+    new_views = sum(s["new_views"] for s in selected_stats)
+    new_count = sum(s["new_count"] for s in selected_stats)
+
+    def money_sum(pairs, no_rpm_note=True):
+        """Sum views x RPM over channels that have an RPM; say how many were left out."""
+        priced = [(v, ch_lib.get_rpm(s["ch"])) for s, v in pairs if ch_lib.get_rpm(s["ch"]) is not None]
+        left_out = len(pairs) - len(priced)
+        if not priced:
+            return "set RPM in the picker"
+        text = fmt_dollars(sum(ch_lib.earnings_dollars(v, rpm) for v, rpm in priced))
+        return text + (f" (excludes {left_out} channel{'s' if left_out != 1 else ''} with no RPM)" if left_out else "")
+
+    rows = [
+        [f"{G} Total Views", fmt(total)],
+        [f"{G} Growth (existing videos)", fmt(growth)],
+        [f"{G} New Uploads (views)", f"{fmt(new_views)} ({new_count} videos)"],
+        [f"{G} Earnings", money_sum([(s, s["total"]) for s in selected_stats])],
+        [f"{G} Increase in Earnings", money_sum([(s, s["growth"] + s["new_views"]) for s in selected_stats])],
+    ]
+
+    if since_day:
+        label = since_day.isoformat()
+        infos = [(s, views_since(s["ch"], since_day)) for s in selected_stats]
+        have = [(s, i) for s, i in infos if i is not None]
+        if not have:
+            rows.append([f"{G} Views since {label}", "no history recorded yet"])
+        else:
+            value = fmt(sum(i["views"] for _, i in have))
+            notes = []
+            if len(have) < len(infos):
+                n = len(infos) - len(have)
+                notes.append(f"{n} channel{'s' if n != 1 else ''} with no history left out")
+            if any(i["partial"] for _, i in have):
+                notes.append("some channels' records start after this date")
+            rows.append([f"{G} Views since {label}", value + (f" ({'; '.join(notes)})" if notes else "")])
+            rows.append([f"{G} Earnings since {label}", money_sum([(s, i["views"]) for s, i in have])])
+
+    stale = [ch_lib.label(s["ch"]) for s in selected_stats if not s["fresh"]]
+    if stale:
+        rows.append([f"{G} Note", f"includes last known data for {len(stale)} stale channel{'s' if len(stale) != 1 else ''}; growth for those is 0"])
+    return rows
+
+
 def build_sheet(selected_stats, data, since_day=None):
     """total_views.csv: summary column on the left, then one table per selected channel.
-    Nothing is added across channels; each channel's earnings use its own RPM."""
+    Each channel's earnings use its own RPM. Grand totals are computed on the fly from the channels shown."""
     summary = []
     for s in selected_stats:
         label = ch_lib.label(s["ch"])
@@ -188,7 +239,12 @@ def build_sheet(selected_stats, data, since_day=None):
             [f"{label} Earnings", total_earn],
             [f"{label} Increase in Earnings", new_earn],
             *[[f"{label} {r[0]}", r[1]] for r in since_rows(s, since_day)],
+            ["", ""],                       # blank row: space between each channel's totals
         ]
+    grand = grand_total_rows(selected_stats, since_day)
+    summary += grand
+    if grand:
+        summary.append(["", ""])            # space after the grand totals
     for s in selected_stats:
         if not s["fresh"]:
             last_ok = (s["meta"].get("last_success") or "never")[:19].replace("T", " ")

@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import channels as ch_lib  # noqa: E402
-from trackerlib import run_platform  # noqa: E402
+from trackerlib import report, run_platform, stream_json  # noqa: E402
 
 WORKERS = 3              # parallel per-video lookups without cookies (kept low: YouTube rate-limits)
 WORKERS_WITH_COOKIES = 8  # a logged-in session is throttled far less, so allow a few more
@@ -41,8 +41,15 @@ class Blocked(RuntimeError):
 # ---------------- FETCH ----------------
 
 def list_shorts(channel, cwd):
-    """Fast pass: ids + titles. View counts here are rounded, so only used as fallback."""
-    proc = subprocess.run(
+    """Fast pass: ids + titles. View counts here are rounded, so they are not used."""
+    items = []
+
+    def on_item(data):
+        if data.get("id"):
+            items.append(data)
+            report("Listing Shorts", len(items), None)
+
+    stream_json(
         [
             "yt-dlp",
             "--ignore-errors",
@@ -51,18 +58,8 @@ def list_shorts(channel, cwd):
             "--match-filter", "duration <= 60",
             f"{channel['url']}/shorts",
         ],
-        capture_output=True,
-        text=True,
-        cwd=cwd,
+        cwd, on_item,
     )
-    items = []
-    for line in proc.stdout.splitlines():
-        try:
-            data = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if data.get("id"):
-            items.append(data)
     return items
 
 
@@ -98,32 +95,27 @@ def lookup(vid, cwd, browser=None, timeout=120, retries=None):
     return None, throttled
 
 
-def lookup_batch(vids, cwd, browser=None):
+def lookup_batch(vids, cwd, browser=None, on_found=None):
     """One yt-dlp process for many videos. Returns ({video_id: data}, throttled).
 
     Videos that fail are simply absent from the dict; throttled says whether
-    YouTube's block markers showed up on stderr.
+    YouTube's block markers showed up in the output. on_found(data) is called the moment
+    each video's data arrives, so callers can show live progress.
     """
     cookie_args = ["--cookies-from-browser", browser] if browser else []
     cmd = ["yt-dlp", "--ignore-errors", "--no-warnings", *EXTRACTOR_ARGS, *cookie_args,
            "--dump-json", *[f"https://www.youtube.com/shorts/{v}" for v in vids]]
-    stdout = stderr = ""
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd,
-                              timeout=PROBE_TIMEOUT + 30 * len(vids))
-        stdout, stderr = proc.stdout, proc.stderr
-    except subprocess.TimeoutExpired as e:  # keep whatever finished before the timeout
-        stdout = e.stdout.decode() if isinstance(e.stdout, bytes) else (e.stdout or "")
-        stderr = e.stderr.decode() if isinstance(e.stderr, bytes) else (e.stderr or "")
     found = {}
-    for line in stdout.splitlines():
-        try:
-            data = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+
+    def on_json(data):
         if data.get("id") and data.get("view_count") is not None:
             found[data["id"]] = data
-    return found, any(m in stderr for m in THROTTLE_MARKERS)
+            if on_found:
+                on_found(data)
+
+    # a timeout still keeps everything that arrived before it
+    _rc, other = stream_json(cmd, cwd, on_json, timeout=PROBE_TIMEOUT + 30 * len(vids))
+    return found, any(m in line for line in other for m in THROTTLE_MARKERS)
 
 
 def installed_cookie_browsers():
@@ -156,10 +148,12 @@ def to_timestamp(data):
 def make_fetch(channel, base_dir):
 
     def fetch():
+        report("Listing Shorts", 0, None)
         flat = list_shorts(channel, base_dir)
         if not flat:
             raise RuntimeError("channel listing returned no shorts")
 
+        report("Checking browser cookies", None, None)
         browser = pick_cookie_browser(flat[0]["id"], base_dir)
         if browser:
             print(f"🍪 Using your {browser} cookies for YouTube lookups.")
@@ -172,11 +166,19 @@ def make_fetch(channel, base_dir):
         state = {"empty_throttled": 0, "throttled": False}
         workers = WORKERS_WITH_COOKIES if browser else WORKERS
 
+        total = len(ids)
+        report("Looking up videos", 0, total)
+
+        def note_found(data):
+            with lock:
+                found[data["id"]] = data
+                report("Looking up videos", len(found), total)   # live: one tick per video
+
         def run_chunk(chunk, mode):
             with lock:
                 if not found and state["empty_throttled"] >= BLOCKED_CHUNKS:
                     return  # clearly blocked: stop hammering
-            got, throttled = lookup_batch(chunk, base_dir, browser=mode)
+            got, throttled = lookup_batch(chunk, base_dir, browser=mode, on_found=note_found)
             with lock:
                 found.update(got)
                 if throttled:
