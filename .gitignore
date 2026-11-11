@@ -1,0 +1,18 @@
+# Local settings and data: RPMs (earnings info), channel handles, view history.
+channels.json
+channels/
+
+# Per-channel data and generated output. Only the scraper scripts are tracked.
+tt/*
+yt/*
+!tt/ttviews.py
+!yt/ytviews.py
+
+# Generated sheet and archived/retired files
+total_views.csv
+archive/
+
+# Python and macOS junk
+__pycache__/
+*.pyc
+.DS_Store
